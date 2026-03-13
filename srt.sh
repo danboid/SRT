@@ -1,91 +1,105 @@
 #!/bin/bash
 
-# SRT aka (Snapper) Snapshot Restore Tool.
+# SRT aka The (Snapper) Snapshot Restore Tool.
 # SRT makes it easy to restore user home directories from BTRFS snapshots created by Snapper using rsync and a simple TUI interface.
-# SRT does not require root permission to run but it does require rsync, dialog and xmlstarlet.
+# SRT does not require root permission to run but it does require rsync and dialog.
 
 # Close your web browser and any open documents before running this, if you are running it locally.
 
 # Configuration
+CONFIG_NAME=$(whoami)
 SNAPSHOT_DIR="$HOME/.snapshots"
 
-# Check Dependencies
-if ! command -v dialog &> /dev/null || ! command -v xmlstarlet &> /dev/null; then
-    echo "This script requires 'dialog' and 'xmlstarlet'."
-    echo "Install them: sudo apt install dialog xmlstarlet (Debian/Ubuntu) or sudo pacman -S dialog xmlstarlet (Arch)"
-    exit 1
-fi
-
-# 1. Build the Snapshot Menu
-MENU_OPTIONS=()
-for dir in $(ls -1 "$SNAPSHOT_DIR" | grep -E '^[0-9]+$' | sort -nr); do
-    INFO_FILE="$SNAPSHOT_DIR/$dir/info.xml"
-    if [ -f "$INFO_FILE" ]; then
-        DATE=$(xmlstarlet sel -t -v "//date" "$INFO_FILE" | cut -d' ' -f1,2)
-        DESC=$(xmlstarlet sel -t -v "//description" "$INFO_FILE")
-        [ -z "$DESC" ] && DESC="No description"
-        MENU_OPTIONS+=("$dir" "[$DATE] $DESC")
+# 1. Dependency Check
+for cmd in dialog rsync snapper; do
+    if ! command -v "$cmd" &> /dev/null; then
+        echo "Error: Missing $cmd"
+        exit 1
     fi
 done
 
+# 2. Loading Message
+# We use --infobox because it doesn't wait for user input
+dialog --title "Snapper Restore" --infobox "\nProcessing snapshot data for user '$CONFIG_NAME'...\nPlease wait." 7 60
+
+# 3. Build the Snapshot Menu
+MENU_OPTIONS=()
+while read -r line; do
+    ID=$(echo "$line" | awk -F'|' '{print $1}' | xargs)
+    DATE=$(echo "$line" | awk -F'|' '{print $4}' | xargs)
+    DESC=$(echo "$line" | awk -F'|' '{print $8}' | xargs)
+
+    if [[ "$ID" =~ ^[0-9]+$ ]] && [ "$ID" -ne 0 ]; then
+        MENU_OPTIONS+=("$ID" "[$DATE] $DESC")
+    fi
+done < <(snapper -c "$CONFIG_NAME" list 2>/dev/null | grep -v "current" | grep "|")
+
 if [ ${#MENU_OPTIONS[@]} -eq 0 ]; then
-    dialog --title "Error" --msgbox "No snapshots found in $SNAPSHOT_DIR" 6 50
+    dialog --title "Error" --msgbox "No snapshots found for config: $CONFIG_NAME" 10 60
     exit 1
 fi
 
-# 2. Display the Selection Menu
-SNAP_NUM=$(dialog --title "Select a Snapshot" \
-    --menu "Choose a snapshot to manage:" 20 75 10 \
-    "${MENU_OPTIONS[@]}" \
+# Reverse list so newest is at the top
+REVERSED_OPTIONS=()
+for (( i=${#MENU_OPTIONS[@]}-2; i>=0; i-=2 )); do
+    REVERSED_OPTIONS+=("${MENU_OPTIONS[i]}" "${MENU_OPTIONS[i+1]}")
+done
+
+# 4. Snapshot Selection
+SNAP_NUM=$(dialog --title "Snapper Restore Tool: $CONFIG_NAME" \
+    --cancel-label "Exit" \
+    --menu "Select a snapshot to restore:" 20 90 12 \
+    "${REVERSED_OPTIONS[@]}" \
     3>&1 1>&2 2>&3)
 
-[ $? -ne 0 ] && exit
+[ $? -ne 0 ] && clear && exit
 
-# 3. Choose Action: Dry Run vs. Restore
-ACTION=$(dialog --title "Choose Action for Snapshot #$SNAP_NUM" \
-    --menu "What would you like to do?" 12 60 4 \
-    "1" "Dry Run (See what will happen)" \
-    "2" "RESTORE (Delete local files and restore)" \
+# 5. Action Choice
+ACTION=$(dialog --title "Snapshot #$SNAP_NUM Options" \
+    --cancel-label "Back" \
+    --menu "Select an action:" 12 60 3 \
+    "1" "DRY RUN (Preview changes and Exit)" \
+    "2" "RESTORE (Destructive Revert)" \
     3>&1 1>&2 2>&3)
 
-[ $? -ne 0 ] && exit
+[ $? -ne 0 ] && clear && exit
 
 TARGET_PATH="$SNAPSHOT_DIR/$SNAP_NUM/snapshot"
 
-# --- Logic for Dry Run ---
+# --- ACTION 1: DRY RUN ---
 if [ "$ACTION" == "1" ]; then
     clear
-    echo "--- DRY RUN: Snapshot #$SNAP_NUM ---"
-    echo "The following changes WOULD be made to your home directory:"
-    echo "-----------------------------------------------------------"
-    # -n is --dry-run. It shows deletions and updates.
-    rsync -aAXv --dry-run --delete --exclude='.snapshots' "$TARGET_PATH/" "$HOME/"
-    echo "-----------------------------------------------------------"
-    echo "DRY RUN COMPLETE. No files were actually changed."
-    read -p "Press Enter to return to terminal."
+    echo "--- DRY RUN PREVIEW: Snapshot #$SNAP_NUM ---"
+    echo "Snapshot Source: $TARGET_PATH"
+    echo "Target Directory: $HOME"
+    echo "------------------------------------------------------------"
+
+    # Run rsync dry run
+    rsync -aAXvi --dry-run --delete --exclude='.snapshots' "$TARGET_PATH/" "$HOME/"
+
+    echo "------------------------------------------------------------"
+    echo "DRY RUN COMPLETE. No files were changed."
+    echo "Script exiting."
     exit 0
 fi
 
-# --- Logic for Actual Restore ---
+# --- ACTION 2: RESTORE ---
 if [ "$ACTION" == "2" ]; then
     dialog --title "!!! FINAL WARNING !!!" --colors \
-        --yesno "You are about to \ZbPERMANENTLY DELETE\Zn your current home directory files and replace them with Snapshot \Zb#$SNAP_NUM\Zn.\n\nOnly the .snapshots folder is safe.\n\nAre you 100% sure?" 15 65
+        --yesno "User: \Zb$CONFIG_NAME\Zn\nSnapshot: \Zb#$SNAP_NUM\Zn\n\nEverything in your Home directory (except .snapshots) will be \ZbDELETED\Zn.\n\nContinue?" 15 65
 
     if [ $? -eq 0 ]; then
         clear
-        echo "PERFORMING RESTORE: Snapshot #$SNAP_NUM"
+        echo "EXECUTING RESTORE: Snapshot #$SNAP_NUM"
         echo "----------------------------------------"
+
         rsync -aAXvh --delete --exclude='.snapshots' --info=progress2 "$TARGET_PATH/" "$HOME/"
 
         if [ ${PIPESTATUS[0]} -eq 0 ]; then
-            dialog --title "Success" --msgbox "Restore finished successfully." 6 45
+            dialog --title "Success" --msgbox "Home directory successfully rolled back to Snapshot #$SNAP_NUM." 7 60
         else
-            echo "Error occurred during rsync. Check permissions."
-            read -p "Press Enter to exit."
+            echo -e "\nError: Rsync failed. Check for open files."
         fi
-    else
-        dialog --infobox "Restore cancelled." 3 30
-        sleep 1
     fi
 fi
 
