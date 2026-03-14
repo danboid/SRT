@@ -1,8 +1,10 @@
 #!/bin/bash
 
-# SRT aka The (Snapper) Snapshot Restore Tool.
+# SRT - Snapshot Restore Tool.
+# by Dan MacDonald
+
 # SRT makes it easy to restore user home directories from BTRFS snapshots created by Snapper using rsync and a simple TUI interface.
-# SRT does not require root permission to run but it does require rsync and dialog.
+# SRT does not require root permission to run but it does require rsync, dialog and read access to your ussrs ~/.snapshots dir..
 
 # Close your web browser and any open documents before running this, if you are running it locally.
 
@@ -10,7 +12,7 @@
 CONFIG_NAME=$(whoami)
 SNAPSHOT_DIR="$HOME/.snapshots"
 
-# 1. Dependency Check
+# Dependency Checks
 for cmd in dialog rsync snapper; do
     if ! command -v "$cmd" &> /dev/null; then
         echo "Error: Missing $cmd"
@@ -18,11 +20,13 @@ for cmd in dialog rsync snapper; do
     fi
 done
 
-# 2. Loading Message
+# Loading message
 # We use --infobox because it doesn't wait for user input
 dialog --title "Snapper Restore" --infobox "\nProcessing snapshot data for user '$CONFIG_NAME'...\nPlease wait." 7 60
 
-# 3. Build the Snapshot Menu
+# Build the snapshots menu
+# Unfortunately snapper can be quite slow to parse users snapshot data.
+# TODO - If the script is being run as root it should be able to parse the info.xml files within each snapshot dir.
 MENU_OPTIONS=()
 while read -r line; do
     ID=$(echo "$line" | awk -F'|' '{print $1}' | xargs)
@@ -45,7 +49,7 @@ for (( i=${#MENU_OPTIONS[@]}-2; i>=0; i-=2 )); do
     REVERSED_OPTIONS+=("${MENU_OPTIONS[i]}" "${MENU_OPTIONS[i+1]}")
 done
 
-# 4. Snapshot Selection
+# Snapshot selection
 SNAP_NUM=$(dialog --title "Snapper Restore Tool: $CONFIG_NAME" \
     --cancel-label "Exit" \
     --menu "Select a snapshot to restore:" 20 90 12 \
@@ -54,7 +58,7 @@ SNAP_NUM=$(dialog --title "Snapper Restore Tool: $CONFIG_NAME" \
 
 [ $? -ne 0 ] && clear && exit
 
-# 5. Action Choice
+# Action choice
 ACTION=$(dialog --title "Snapshot #$SNAP_NUM Options" \
     --cancel-label "Back" \
     --menu "Select an action:" 12 60 3 \
